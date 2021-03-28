@@ -61,7 +61,11 @@ import logging
 import math
 import sys
 import time
+import pystray
+import queue
 
+from PIL import Image, ImageDraw, ImageFont
+from threading import Timer, Thread
 from docopt import docopt
 import liquidctl.cli as _borrow
 from liquidctl.util import normalize_profile, interpolate_profile
@@ -163,7 +167,42 @@ def parse_profile(arg, mintemp=0, maxtemp=100, minduty=0, maxduty=100):
     return normalize_profile(val, critx=maxtemp)
 
 
+def generate_systray_icon(text):
+    W, H = (32,32)
+    image = Image.new('RGBA', (W,H), (255, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype('arial.ttf', 30)
+    w, h = draw.textsize(text, font=font)
+    draw.text(((W-w)/2,(H-h)/2), text, fill=(255,255,255), font=font)
+    return image
+
+
+def close_icon(icon):
+    icon.visible = False
+    icon.stop()
+
+
+def update_icon(icon):
+    icon.visible = True
+    duty_queue = icon._duty_queue
+    while True:
+        try:
+            duty = duty_queue.get(timeout=1)
+            icon.icon = generate_systray_icon(str(duty))
+        except queue.Empty:
+            pass
+
+
+def init_icon(duty_queue):
+    icon = pystray.Icon("LiquidCTL Fan Speed", icon=generate_systray_icon("0"), title="LiquidCTL Fan Speed")
+    icon.menu = pystray.Menu(pystray.MenuItem('Close Icon', lambda : close_icon(icon)))
+    icon._duty_queue = duty_queue
+    icon.run(setup=update_icon)
+
+
 def control(device, channels, profiles, sensors, update_interval):
+    duty_queue = queue.Queue()
+    Thread(daemon=True, target=init_icon, args=[duty_queue]).start()
     LOGGER.info('device: %s on bus %s and address %s', device.description, device.bus, device.address)
     for channel, profile, sensor in zip(channels, profiles, sensors):
         LOGGER.info('channel: %s following profile %s on %s', channel, str(profile), sensor)
@@ -200,6 +239,8 @@ def control(device, channels, profiles, sensors, update_interval):
                 LOGGER.info('%s control: lpf(%s) = lpf(%.1f°C) = %.1f°C => duty := %d%%',
                             channel, sensor, sample, ema, duty)
                 apply_duty(channel, duty)
+                if (channel == "fan"):
+                    duty_queue.put(duty)
             failures = 0
         except Exception as err:
             failures += 1
